@@ -1,21 +1,34 @@
-import { Container, Graphics, Sprite, Text, TextStyle, BlurFilter } from "pixi.js";
+import { Container, Graphics, Text, TextStyle, BlurFilter } from "pixi.js";
 import { gsap } from "gsap";
 import type { AssetLoader } from "../assets/AssetLoader";
+import type {
+  AutoplayLimits,
+  AutoplayPreset,
+  AutoplaySnapshot,
+  AutoplayStopReason,
+} from "../game/Autoplay";
+import { DEFAULT_AUTOPLAY_LIMITS } from "../game/Autoplay";
+import type { SessionStats } from "../game/SpinHistory";
 
 export interface UIButtons {
   spin: PixiButton;
   autoplay: PixiButton;
+  autoplayPreset: PixiButton;
   betMinus: PixiButton;
   betPlus: PixiButton;
   info: PixiButton;
+  reset: PixiButton;
 }
 
 export interface UICallbacks {
   onSpin(): void;
-  onToggleAutoplay(): void;
+  onToggleAutoplay(preset: AutoplayPreset, limits: AutoplayLimits): void;
   onBetChange(delta: number): void;
   onShowInfo(): void;
+  onResetBalance(): void;
 }
+
+const AUTOPLAY_PRESETS: readonly AutoplayPreset[] = [10, 25, 50, 100];
 
 export class PixiButton extends Container {
   public readonly hit: Graphics;
@@ -31,7 +44,7 @@ export class PixiButton extends Container {
 
   constructor(
     text: string,
-    private readonly variant: "primary" | "secondary" | "ghost" = "secondary",
+    private readonly variant: "primary" | "secondary" | "ghost" | "danger" = "secondary",
     btnWidth = 180,
     btnHeight = 64,
     iconBuilder?: (g: Graphics, w: number, h: number) => void,
@@ -114,6 +127,15 @@ export class PixiButton extends Container {
     this.label.text = text;
   }
 
+  flashGlow(color: number, repeat = 2): void {
+    gsap.fromTo(
+      this.innerGlow,
+      { alpha: 1 },
+      { alpha: 0.2, duration: 0.32, repeat: repeat * 2, yoyo: true, ease: "sine.inOut" },
+    );
+    void color;
+  }
+
   private drawBackground(hover: boolean): void {
     this.bg.clear();
     this.innerGlow.clear();
@@ -135,6 +157,13 @@ export class PixiButton extends Container {
           : this.active
             ? { top: 0xffd76a, bot: 0x6a48d8, stroke: 0xffffff, glow: 0xffd76a }
             : { top: 0x2a1656, bot: 0x4a2a9e, stroke: 0x9ad2ff, glow: 0x6a48d8 };
+      }
+      if (this.variant === "danger") {
+        return hover
+          ? { top: 0xff7676, bot: 0xa61b1b, stroke: 0xffe6e6, glow: 0xff8080 }
+          : this.active
+            ? { top: 0xff8080, bot: 0x801010, stroke: 0xffffff, glow: 0xff5050 }
+            : { top: 0x6a1818, bot: 0x3a0a0a, stroke: 0xff8080, glow: 0xa61b1b };
       }
       return hover
         ? { top: 0x1a1030, bot: 0x2a1656, stroke: 0xffd76a, glow: 0x6a48d8 }
@@ -161,12 +190,84 @@ export class PixiButton extends Container {
   }
 }
 
+/**
+ * Compact session stats panel: SPINS / NET / RTP / BIGGEST.
+ * Sits above the bottom bar.
+ */
+class SessionStatsPanel extends Container {
+  private readonly bg: Graphics;
+  private readonly spins: Text;
+  private readonly net: Text;
+  private readonly rtp: Text;
+  private readonly best: Text;
+  public panelWidth = 460;
+  public panelHeight = 44;
+
+  constructor() {
+    super();
+    this.bg = new Graphics();
+    this.addChild(this.bg);
+    this.spins = this.makeText("SPINS 0");
+    this.net = this.makeText("NET 0.00");
+    this.rtp = this.makeText("RTP -%");
+    this.best = this.makeText("BEST 0.00");
+    this.addChild(this.spins, this.net, this.rtp, this.best);
+    this.drawBg();
+    this.layout();
+  }
+
+  private makeText(initial: string): Text {
+    return new Text(
+      initial,
+      new TextStyle({
+        fontFamily: "Georgia, serif",
+        fontSize: 14,
+        fontWeight: "700",
+        fill: 0xffe066,
+        letterSpacing: 2,
+        align: "center",
+      }),
+    );
+  }
+
+  private drawBg(): void {
+    this.bg.clear();
+    this.bg.beginFill(0x05030a, 0.7);
+    this.bg.lineStyle({ width: 1.5, color: 0x6a48d8, alpha: 0.55 });
+    this.bg.drawRoundedRect(0, 0, this.panelWidth, this.panelHeight, 10);
+    this.bg.endFill();
+  }
+
+  private layout(): void {
+    const cols = [this.spins, this.net, this.rtp, this.best];
+    const cellW = this.panelWidth / cols.length;
+    for (let i = 0; i < cols.length; i++) {
+      const t = cols[i]!;
+      t.anchor.set(0.5);
+      t.x = (i + 0.5) * cellW;
+      t.y = this.panelHeight / 2;
+    }
+  }
+
+  set(stats: SessionStats): void {
+    this.spins.text = `SPINS ${stats.spins}`;
+    const netSign = stats.net >= 0 ? "+" : "−";
+    this.net.text = `NET ${netSign}${Math.abs(stats.net).toFixed(2)}`;
+    this.rtp.text = `RTP ${stats.spins > 0 ? (stats.rtp * 100).toFixed(1) + "%" : "—"}`;
+    this.best.text = `BEST ${stats.biggestWin.toFixed(2)}`;
+  }
+}
+
 /** UIManager wires the bottom-bar buttons and their interactions. */
 export class UIManager {
   public readonly root = new Container();
   public readonly buttons: UIButtons;
   private readonly bg: Graphics;
   private readonly autoplayLabel = "AUTOPLAY";
+  private readonly stats: SessionStatsPanel;
+  private readonly demoBadge: Text;
+  private currentPreset: AutoplayPreset = 10;
+  private currentLimits: AutoplayLimits = DEFAULT_AUTOPLAY_LIMITS;
 
   constructor(
     parent: Container,
@@ -181,36 +282,83 @@ export class UIManager {
 
     this.buttons = {
       spin: new PixiButton("SPIN", "primary", 200, 92, drawSpinIcon),
-      autoplay: new PixiButton(this.autoplayLabel, "secondary", 170, 64, drawAutoIcon),
+      autoplay: new PixiButton(this.autoplayLabel, "secondary", 170, 56, drawAutoIcon),
+      autoplayPreset: new PixiButton("×10", "ghost", 70, 30),
       betMinus: new PixiButton("−", "secondary", 64, 64),
       betPlus: new PixiButton("+", "secondary", 64, 64),
       info: new PixiButton("i", "ghost", 56, 56, drawInfoIcon),
+      reset: new PixiButton("RESET", "danger", 110, 44),
     };
 
     this.root.addChild(
       this.buttons.info,
+      this.buttons.reset,
       this.buttons.betMinus,
       this.buttons.betPlus,
       this.buttons.autoplay,
+      this.buttons.autoplayPreset,
       this.buttons.spin,
     );
 
+    this.stats = new SessionStatsPanel();
+    this.root.addChild(this.stats);
+
+    this.demoBadge = new Text(
+      "DEMO COINS",
+      new TextStyle({
+        fontFamily: "Georgia, serif",
+        fontSize: 11,
+        fontWeight: "700",
+        fill: 0xffd76a,
+        letterSpacing: 4,
+      }),
+    );
+    this.demoBadge.anchor.set(0.5);
+    this.root.addChild(this.demoBadge);
+
     this.buttons.spin.on("pointertap", () => callbacks.onSpin());
-    this.buttons.autoplay.on("pointertap", () => callbacks.onToggleAutoplay());
+    this.buttons.autoplay.on("pointertap", () =>
+      callbacks.onToggleAutoplay(this.currentPreset, this.currentLimits),
+    );
+    this.buttons.autoplayPreset.on("pointertap", () => {
+      const idx = AUTOPLAY_PRESETS.indexOf(this.currentPreset);
+      this.currentPreset = AUTOPLAY_PRESETS[(idx + 1) % AUTOPLAY_PRESETS.length]!;
+      this.buttons.autoplayPreset.setLabel(`×${this.currentPreset}`);
+    });
     this.buttons.betMinus.on("pointertap", () => callbacks.onBetChange(-1));
     this.buttons.betPlus.on("pointertap", () => callbacks.onBetChange(1));
     this.buttons.info.on("pointertap", () => callbacks.onShowInfo());
+    this.buttons.reset.on("pointertap", () => callbacks.onResetBalance());
   }
 
   setSpinningState(spinning: boolean): void {
     this.buttons.spin.setEnabled(!spinning);
     this.buttons.betMinus.setEnabled(!spinning);
     this.buttons.betPlus.setEnabled(!spinning);
+    this.buttons.autoplayPreset.setEnabled(!spinning);
+    this.buttons.reset.setEnabled(!spinning);
+    // AUTOPLAY itself remains clickable during a spin so the user can stop it.
   }
 
-  setAutoplayActive(active: boolean): void {
-    this.buttons.autoplay.setActive(active);
-    this.buttons.autoplay.setLabel(active ? "STOP" : this.autoplayLabel);
+  setAutoplay(snapshot: AutoplaySnapshot): void {
+    this.buttons.autoplay.setActive(snapshot.active);
+    this.buttons.autoplay.setLabel(
+      snapshot.active ? `STOP (${snapshot.remaining})` : this.autoplayLabel,
+    );
+  }
+
+  setSessionStats(stats: SessionStats): void {
+    this.stats.set(stats);
+  }
+
+  /** Pulse the RESET button to acknowledge a reset was applied. */
+  flashReset(): void {
+    this.buttons.reset.flashGlow(0xff5050, 3);
+  }
+
+  /** Visually flash the AUTOPLAY button to highlight an auto-stop reason. */
+  flashAutoplayReason(reason: AutoplayStopReason): void {
+    this.buttons.autoplay.flashGlow(0xffd76a, reason === "free-spins" ? 4 : 2);
   }
 
   resize(): void {
@@ -228,7 +376,10 @@ export class UIManager {
     this.buttons.spin.y = cy - 46;
 
     this.buttons.autoplay.x = this.buttons.spin.x + 220;
-    this.buttons.autoplay.y = cy - 32;
+    this.buttons.autoplay.y = cy - 28;
+
+    this.buttons.autoplayPreset.x = this.buttons.autoplay.x + 90 - 35;
+    this.buttons.autoplayPreset.y = this.buttons.autoplay.y + 60;
 
     this.buttons.betMinus.x = this.buttons.spin.x - 84;
     this.buttons.betMinus.y = cy - 32;
@@ -238,6 +389,15 @@ export class UIManager {
 
     this.buttons.info.x = 32;
     this.buttons.info.y = cy - 28;
+
+    this.buttons.reset.x = w - 32 - this.buttons.reset.btnWidth;
+    this.buttons.reset.y = cy - 22;
+
+    this.stats.x = (w - this.stats.panelWidth) / 2;
+    this.stats.y = h - barHeight - this.stats.panelHeight - 16;
+
+    this.demoBadge.x = w / 2;
+    this.demoBadge.y = h - barHeight - this.stats.panelHeight - 36;
   }
 }
 
@@ -280,6 +440,4 @@ function drawInfoIcon(g: Graphics, w: number, h: number): void {
   g.endFill();
 }
 
-// BlurFilter is re-exported here so we don't have to depend on the renderer
-// for the import — useful for unit tests that mock the canvas.
 export { BlurFilter };
