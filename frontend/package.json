@@ -1,0 +1,23 @@
+{
+  "name": "slot-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "gsap": "^3.12.5",
+    "pixi.js": "^7.4.0"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^4.1.6",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.10",
+    "vitest": "^4.1.6"
+  }
+}
