@@ -42,3 +42,28 @@ jobs:
 
       - name: Quick RTP smoke check (200K spins)
         run: npx ts-node scripts/simulate.ts --spins 200000
+
+  frontend:
+    name: frontend / typecheck / build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies (frontend)
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Typecheck (frontend, strict)
+        working-directory: ./frontend
+        run: npm run typecheck
+
+      - name: Build (frontend, vite)
+        working-directory: ./frontend
+        run: npm run build
